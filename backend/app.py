@@ -237,6 +237,7 @@ def generate_podcast():
 
 
 @app.route('/api/upload_audio', methods=['POST'])
+@app.route('/api/upload-audio', methods=['POST'])
 def upload_audio():
     """
     上传音频文件接口（用于录音功能）
@@ -250,6 +251,7 @@ def upload_audio():
             return jsonify({"success": False, "error": "音频文件为空"})
 
         # 生成文件名
+        import time
         session_id = request.form.get('session_id', str(uuid.uuid4()))
         speaker = request.form.get('speaker', 'unknown')
         filename = f"{session_id}_{speaker}_{int(time.time())}.wav"
@@ -259,13 +261,134 @@ def upload_audio():
 
         return jsonify({
             "success": True,
-            "filename": filename,
-            "path": file_path
+            "filepath": file_path,
+            "filename": filename
         })
 
     except Exception as e:
         logger.error(f"音频上传失败: {str(e)}")
         return jsonify({"success": False, "error": str(e)})
+
+
+@app.route('/api/clone-voice', methods=['POST'])
+def clone_voice():
+    """
+    克隆音色接口
+    """
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"success": False, "error": "请求数据为空"})
+
+        filepath = data.get('filepath')
+        speaker = data.get('speaker', 'unknown')
+
+        if not filepath or not os.path.exists(filepath):
+            return jsonify({"success": False, "error": "音频文件不存在"})
+
+        logger.info(f"开始克隆音色: {filepath}, speaker: {speaker}")
+
+        # 调用 voice_manager 来克隆音色
+        user_api_key = data.get('api_key', '')
+        if not user_api_key:
+            # 从配置获取 API key
+            from config import MINIMAX_API_KEY
+            user_api_key = MINIMAX_API_KEY
+
+        # 创建临时配置
+        voice_config = {"type": "custom", "audio_file": filepath}
+        if speaker == 'speaker1':
+            result = voice_manager.prepare_voices(voice_config, {"type": "default", "voice_name": "mini"}, api_key=user_api_key)
+        else:
+            result = voice_manager.prepare_voices({"type": "default", "voice_name": "mini"}, voice_config, api_key=user_api_key)
+
+        if not result["success"]:
+            return jsonify({"success": False, "error": result.get("error", "克隆失败")})
+
+        # 返回音色 ID 和 trace ID
+        voice_id = result.get('speaker1' if speaker == 'speaker1' else 'speaker2')
+        trace_ids = result.get('trace_ids', {})
+
+        return jsonify({
+            "success": True,
+            "voice_id": voice_id,
+            "upload_trace_id": trace_ids.get(f'{speaker}_upload'),
+            "clone_trace_id": trace_ids.get(f'{speaker}_clone')
+        })
+
+    except Exception as e:
+        logger.error(f"音色克隆失败: {str(e)}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route('/api/parse-content', methods=['POST'])
+def parse_content():
+    """
+    解析内容接口（网页或PDF）
+    """
+    try:
+        # 获取请求数据
+        data = request.get_json() if request.is_json else {}
+        text_input = data.get('text_input', '')
+        url_input = data.get('url_input', '')
+        pdf_file = request.files.get('file')
+
+        logger.info(f"收到内容解析请求: text={len(text_input)}, url={url_input}, pdf={pdf_file is not None}")
+
+        # 解析文本
+        text_content = text_input
+
+        # 解析网址
+        url_content = ""
+        if url_input:
+            url_result = content_parser.parse_url(url_input)
+            if url_result["success"]:
+                url_content = url_result["content"]
+            else:
+                return jsonify({
+                    "success": False,
+                    "error": url_result.get("error", "网址解析失败")
+                })
+
+        # 解析PDF
+        pdf_content = ""
+        if pdf_file:
+            # 保存临时文件
+            import time
+            filename = secure_filename(pdf_file.filename)
+            pdf_path = os.path.join(UPLOAD_DIR, f"{int(time.time())}_{filename}")
+            pdf_file.save(pdf_path)
+
+            pdf_result = content_parser.parse_pdf(pdf_path)
+            if pdf_result["success"]:
+                pdf_content = pdf_result["content"]
+            else:
+                return jsonify({
+                    "success": False,
+                    "error": pdf_result.get("error", "PDF解析失败")
+                })
+
+        # 合并内容
+        merged_content = content_parser.merge_contents(text_input, url_content, pdf_content)
+
+        if not merged_content or merged_content == "":
+            return jsonify({
+                "success": False,
+                "error": "请至少提供一种输入内容（文本/网址/PDF）"
+            })
+
+        return jsonify({
+            "success": True,
+            "content": merged_content,
+            "message": f"内容解析完成，共 {len(merged_content)} 字符"
+        })
+
+    except Exception as e:
+        logger.error(f"内容解析失败: {str(e)}", exc_info=True)
+        return jsonify({
+            "success": False,
+            "error": f"服务器错误: {str(e)}"
+        })
 
 
 @app.route('/download/audio/<filename>', methods=['GET'])
